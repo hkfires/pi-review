@@ -1,0 +1,40 @@
+# review
+
+A standalone Pi extension that adds `/review` and `/end-review`. This project is a modified fork of the [`review` extension in `diegopetrucci/pi-extensions`](https://github.com/diegopetrucci/pi-extensions/tree/main/extensions/review), based on upstream commit [`ce73c9e`](https://github.com/diegopetrucci/pi-extensions/commit/ce73c9efb8c47abbcdf1f79ee7cc65f453742425). That extension was adapted from [`mitsuhiko/agent-stuff`](https://github.com/mitsuhiko/agent-stuff/blob/main/extensions/review.ts).
+
+## Install
+
+Install the standalone package:
+
+```bash
+pi install npm:@hkfires/pi-review
+```
+
+Then reload pi:
+
+```text
+/reload
+```
+
+## Usage
+
+- `/review` — open the interactive selector
+- `/review uncommitted` — review uncommitted changes
+- `/review branch main` — review against a base branch
+- `/review commit <sha>` — review a specific commit
+- `/review pr <number-or-url>` — fetch and review a GitHub pull request
+- `/review folder src docs` — review one or more folders/files as a snapshot
+- `/review --extra "focus on performance regressions"` — add one-off instructions
+- `/end-review` — return from the review branch and optionally summarize or queue fixes
+
+## Notes
+
+- `/review` requires interactive mode (TUI); `/end-review` requires a UI.
+- The extension supports loop fixing, custom review instructions persisted in the session, a blocking-findings parser, and `/end-review` handoff modes (return only, return and summarize, or return and fix findings). Loop fixing cycles until the parser reports no blocking findings: tagged P0–P2 items, or a "needs attention" verdict when no priority tags are present. Commit review is excluded from loop fixing.
+- Loop fixing always uses Empty branch mode and skips the Empty branch / Current session choice.
+- PR review requires `gh` access and a clean working tree for tracked files.
+- If the project is trusted and a `REVIEW_GUIDELINES.md` file exists next to the repo's `<pi-config-dir>` directory, its contents are appended to the review prompt. `<pi-config-dir>` is Pi's runtime config directory name (`CONFIG_DIR_NAME`; `.pi` by default).
+
+## License and attribution
+
+This package vendors and adapts `extensions/review.ts` from `mitsuhiko/agent-stuff` under the Apache-2.0 license. See [LICENSE](./LICENSE).

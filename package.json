@@ -1,0 +1,39 @@
+{
+  "name": "@hkfires/pi-review",
+  "version": "0.1.18",
+  "description": "A standalone code review extension for Pi with /review and /end-review, forked from diegopetrucci/pi-extensions.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "review",
+    "code-review",
+    "git",
+    "github"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hkfires/pi-review.git"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
