@@ -433,7 +433,7 @@ for (const { name, config, models, switchTo, switchOnRequest = 1, followUp, fall
       if (!loopMode && !["loop", "current session", "provider error"].includes(name)) await run("/end-review");
       if (newGrant) assert.ok(!runtime.hasConfiguredAuth("spare"), "The extension must leave authorization refresh to Pi");
     }
-    assert.deepEqual(requests, models);
+    assert.deepEqual(requests, models, JSON.stringify({ errors, warnings }));
     if (levels) assert.deepEqual(requestLevels, levels);
     if (name === "independent model and thinking pairs") {
       assert.equal(wireEfforts[0], "medium");

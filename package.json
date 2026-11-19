@@ -1,6 +1,6 @@
 {
   "name": "@hkfires/pi-review",
-  "version": "0.1.18",
+  "version": "1.0.0",
   "description": "A standalone code review extension for Pi with /review and /end-review, forked from diegopetrucci/pi-extensions.",
   "keywords": [
     "pi-package",
