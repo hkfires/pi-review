@@ -1507,12 +1507,12 @@ export default function reviewExtension(pi: ExtensionAPI) {
           label: customInstructionsLabel,
           description: customInstructionsDescription,
         },
+        { value: "modelSettings", label: "Model settings", description: "(review and fix)" },
         {
           value: TOGGLE_LOOP_FIXING_VALUE,
           label: loopToggleLabel,
           description: loopToggleDescription,
         },
-        { value: "modelSettings", label: "Model settings", description: "(review and fix)" },
       ];
 
       const result = await ctx.ui.custom<ReviewPresetValue | null>((tui, theme, _kb, done) => {

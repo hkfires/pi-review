@@ -234,6 +234,18 @@ for (const { name, config, models, switchTo, switchOnRequest = 1, followUp, fall
           const dialog = (options as { blocked?: { message: string } } | undefined)?.blocked?.message;
           if (dialog === "Select a review preset") {
             if (prExit) return null as T;
+            const component = await factory(
+              { requestRender() {} } as TUI, ui.theme, getKeybindings() as KeybindingsManager, () => {},
+            );
+            try {
+              const rows = component.render(150);
+              const modelIndex = rows.findIndex(row => row.includes("Model settings"));
+              const loopIndex = rows.findIndex(row => row.includes("Loop Fixing"));
+              assert.ok(modelIndex >= 0);
+              assert.equal(loopIndex, modelIndex + 1);
+            } finally {
+              component.dispose?.();
+            }
             return (menuVisits++ < 3 ? "modelSettings" : null) as T;
           }
           const result = Promise.withResolvers<T>();
