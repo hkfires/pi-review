@@ -20,6 +20,9 @@
     "README.md",
     "LICENSE"
   ],
+  "scripts": {
+    "test": "node --test test/host-review.test.ts"
+  },
   "publishConfig": {
     "access": "public"
   },
@@ -29,8 +32,17 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-ai": ">=0.86.0",
+    "@earendil-works/pi-coding-agent": ">=0.86.0",
+    "@earendil-works/pi-tui": ">=0.86.0"
+  },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2",
+    "semver": "^7.7.0"
+  },
+  "devDependencies": {
+    "@types/proper-lockfile": "^4.1.4",
+    "@types/semver": "^7.7.1"
   },
   "type": "module",
   "engines": {

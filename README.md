@@ -4,7 +4,7 @@ A standalone Pi extension that adds `/review` and `/end-review`. This project is
 
 ## Install
 
-Install the standalone package:
+Install the standalone package in Pi 0.86.0 or newer:
 
 ```bash
 pi install npm:@hkfires/pi-review
@@ -26,6 +26,23 @@ Then reload pi:
 - `/review folder src docs` — review one or more folders/files as a snapshot
 - `/review --extra "focus on performance regressions"` — add one-off instructions
 - `/end-review` — return from the review branch and optionally summarize or queue fixes
+
+## Model settings
+
+Open **`/review` → Model settings** and choose **Review** or **Fix**. Select a model, then choose one of its supported thinking levels to save the pair. Pressing Esc in either picker keeps the previous settings. Choosing **Use session model** clears both overrides for that phase and follows the session’s current model and thinking level.
+
+When a configured model is unavailable, the run uses the session model and its thinking level. When the run ends, Pi restores the starting model and thinking level for branch summaries and ordinary messages, preserving any thinking level you explicitly changed during the run. If the session has no available model, starting a review uses the configured Review model as the new session model.
+
+Pi stores these optional settings in `review.json` in its agent directory (normally `~/.pi/agent/`):
+
+```json
+{
+  "reviewModel": "anthropic/claude-sonnet-4-6",
+  "reviewThinkingLevel": "high",
+  "fixModel": "openai/gpt-5.4",
+  "fixThinkingLevel": "medium"
+}
+```
 
 ## Notes
 

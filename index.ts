@@ -13,8 +13,10 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   ExtensionCommandContext,
+  ModelChangeEntry,
 } from "@earendil-works/pi-coding-agent";
-import { CONFIG_DIR_NAME, DynamicBorder, BorderedLoader } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, DynamicBorder, BorderedLoader, getAgentDir, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
+import { clampThinkingLevel, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
   Container,
   fuzzyFilter,
@@ -25,7 +27,11 @@ import {
   Text,
 } from "@earendil-works/pi-tui";
 import path from "node:path";
-import { promises as fs } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { lstatSync, promises as fs } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
+import lockfile from "proper-lockfile";
+import lt from "semver/functions/lt.js";
 
 const GIT_GH_COMMAND_TIMEOUT_MS = 30_000;
 const PR_CHECKOUT_TIMEOUT_MS = 120_000;
@@ -73,6 +79,91 @@ type ReviewSettingsState = {
   loopFixingEnabled?: boolean;
   customInstructions?: string;
 };
+
+const THINKING_FIELD = { reviewModel: "reviewThinkingLevel", fixModel: "fixThinkingLevel" } as const;
+type ModelField = keyof typeof THINKING_FIELD;
+type ModelSettings = Record<string, unknown>;
+type Model = NonNullable<ExtensionContext["model"]>;
+type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
+type ThinkingDefaults = Pick<ReturnType<SettingsManager["getGlobalSettings"]>, "defaultThinkingLevel" | "modelThinkingLevels">;
+type RunModel = { model?: Model; thinking?: ThinkingLevel };
+
+function modelRef(model: Model) {
+  return `${model.provider}/${model.id}`;
+}
+
+async function readModelSettings(file = path.join(getAgentDir(), "review.json")): Promise<ModelSettings> {
+  try {
+    const text = await fs.readFile(file, "utf8");
+    const settings = JSON.parse(text.replace(/^\uFEFF/, ""));
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+      throw new Error("Expected a JSON object");
+    }
+    return settings;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && !lstatSync(file, { throwIfNoEntry: false })) return {};
+    throw new Error(`Could not read ${file}: ${error instanceof Error ? error.message : error}`, { cause: error });
+  }
+}
+
+async function saveModelSetting(
+  settingsFile: string,
+  field: ModelField,
+  expected: ModelSettings,
+  selected: string | undefined,
+  thinking: ThinkingLevel | undefined,
+) {
+  await fs.mkdir(path.dirname(settingsFile), { recursive: true });
+  const options = { realpath: false, stale: 10_000 };
+  let release;
+  try {
+    release = await lockfile.lock(settingsFile, options);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY") throw error;
+    // Older versions staged the JSON inside the lock. Only a stale lock reaches rmdir.
+    await fs.rm(path.join(settingsFile + ".lock", "review.json"), { force: true });
+    // Removing the legacy file refreshes the directory mtime. Let the lease expire again.
+    release = await lockfile.lock(settingsFile, {
+      ...options,
+      retries: { retries: 1, minTimeout: options.stale + 1000 },
+    });
+  }
+  try {
+    if (lstatSync(settingsFile, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      throw new Error(`Edit the symlink target for ${settingsFile} directly.`);
+    }
+    const latest = await readModelSettings(settingsFile);
+    const levelField = THINKING_FIELD[field];
+    if (!isDeepStrictEqual(latest[field], expected[field]) || !isDeepStrictEqual(latest[levelField], expected[levelField])) {
+      throw new Error(`${field} settings changed. Reopen Model settings.`);
+    }
+    latest[field] = selected;
+    latest[levelField] = thinking;
+    const temp = settingsFile + ".pi-review.tmp";
+    await fs.rm(temp, { force: true });
+    await fs.writeFile(temp, JSON.stringify(latest, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+    await fs.rename(temp, settingsFile);
+  } finally {
+    await release();
+  }
+}
+
+async function getRunModels(ctx: ExtensionContext, field: ModelField) {
+  const settings = await readModelSettings();
+  const available = ctx.modelRegistry.getAvailable();
+  const current = ctx.model && modelRef(ctx.model);
+  const session = available.find(m => modelRef(m) === current);
+  const reference = settings[field];
+  const model = available.find(m => modelRef(m) === reference);
+  if (!session && (!model || field === "fixModel")) {
+    throw new Error(field === "fixModel"
+      ? "Select an available session model before returning with a summary."
+      : "Select an authorized session or Review model before starting a review.");
+  }
+  const effective = reference === undefined ? session : model;
+  const thinking = effective && getSupportedThinkingLevels(effective).find(level => level === settings[THINKING_FIELD[field]]);
+  return { override: { model, thinking }, session, fallback: reference !== undefined && !model };
+}
 
 type ProjectConfigContext = {
   cwd: string;
@@ -740,6 +831,7 @@ async function checkoutPullRequest(
     return null;
   }
 
+  await getRunModels(ctx, "reviewModel");
   ctx.ui.notify(`Checking out PR #${prNumber}...`, "info");
   const { stdout, stderr, code, killed } = await pi.exec(
     "gh",
@@ -1105,6 +1197,7 @@ const TOGGLE_LOOP_FIXING_VALUE = "toggleLoopFixing" as const;
 const TOGGLE_CUSTOM_INSTRUCTIONS_VALUE = "toggleCustomInstructions" as const;
 type ReviewPresetValue =
   | (typeof REVIEW_PRESETS)[number]["value"]
+  | "modelSettings"
   | typeof TOGGLE_LOOP_FIXING_VALUE
   | typeof TOGGLE_CUSTOM_INSTRUCTIONS_VALUE;
 
@@ -1141,6 +1234,7 @@ ${HUMAN_REVIEWER_CALLOUTS}
 Preserve exact file paths, function names, and error messages where available.`;
 
 export const __test__ = {
+  saveModelSetting,
   applyReviewSettings,
   applyReviewState,
   buildReviewPrompt,
@@ -1163,6 +1257,141 @@ export const __test__ = {
 };
 
 export default function reviewExtension(pi: ExtensionAPI) {
+  if (lt(VERSION, "0.86.0")) {
+    throw new Error(`pi-review requires Pi 0.86.0 or newer (running ${VERSION}).`);
+  }
+  async function trySetModel(model: Model, ctx: ExtensionContext) {
+    const ref = modelRef(model);
+    try {
+      const available = ctx.modelRegistry.getAvailable().find(m => modelRef(m) === ref);
+      if (!available || !await pi.setModel(available)) throw new Error("Model unavailable.");
+      return true;
+    } catch (error) {
+      const current = ctx.model ? ` Using ${modelRef(ctx.model)}.` : "";
+      ctx.ui.notify(`Could not select ${ref}. ${error instanceof Error ? error.message : error}${current}`, "warning");
+      return false;
+    }
+  }
+
+  // sendUserMessage returns before input hooks finish. Scope model selection and restoration to this run.
+  type ModelSnapshot = { model: Model; thinking: ThinkingLevel; leaf: string | null; defaults: ThinkingDefaults };
+  type Phase = RunModel & { waitForIdle: () => Promise<void>; restore?: () => Promise<void> };
+  const promptModel = new AsyncLocalStorage<Phase>();
+  const activePhases = new WeakMap<ExtensionContext["sessionManager"], Phase>();
+  const quitting = new WeakSet<ExtensionContext["sessionManager"]>();
+  // Pi appends a clamp directly after model_change. Earlier event handlers may append more entries.
+  const selectionAdjustments = new WeakMap<ModelChangeEntry, object | undefined>();
+  pi.on("model_select", (event, ctx) => {
+    if (event.source === "restore") return;
+    let entry = ctx.sessionManager.getLeafEntry();
+    let child;
+    while (entry && entry.type !== "model_change") {
+      child = entry;
+      entry = entry.parentId ? ctx.sessionManager.getEntry(entry.parentId) : undefined;
+    }
+    if (entry?.provider === event.model.provider && entry.modelId === event.model.id) {
+      selectionAdjustments.set(entry, child?.type === "thinking_level_change" ? child : undefined);
+    }
+  });
+
+  function thinkingDefaults(ctx: ExtensionContext): ThinkingDefaults {
+    if ("getSettings" in pi && typeof pi.getSettings === "function") return pi.getSettings();
+    // Pi 0.86 exposes the configured defaults through SettingsManager.
+    const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() });
+    return { defaultThinkingLevel: settings.getDefaultThinkingLevel(), modelThinkingLevels: settings.getAllModelThinkingLevels() };
+  }
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    const override = promptModel.getStore();
+    if (!override || override.restore || !("prompt" in event) || !ctx.model) return;
+    const session = ctx.sessionManager;
+    if (quitting.has(session)) return;
+    const start = {
+      model: ctx.model, thinking: pi.getThinkingLevel(),
+      leaf: ctx.sessionManager.getLeafId(), defaults: thinkingDefaults(ctx),
+    };
+    const applied = Promise.withResolvers<void>();
+    let restoring: Promise<void> | undefined;
+    override.restore = () => {
+      restoring ??= applied.promise.then(() => restoreModel(ctx, start)).finally(() => {
+        if (activePhases.get(session) === override) activePhases.delete(session);
+      });
+      return restoring;
+    };
+    activePhases.set(session, override);
+    try {
+      if (override.model && modelRef(override.model) !== modelRef(start.model)) {
+        if (!await trySetModel(override.model, ctx)) return;
+        const selectedLevel = pi.getThinkingLevel();
+        // An embedded Pi session can supply an in-memory default instead of the on-disk one.
+        if (selectedLevel !== clampThinkingLevel(override.model, start.thinking)) {
+          (start.defaults.modelThinkingLevels ??= {})[modelRef(override.model)] = selectedLevel;
+        }
+      }
+      if (override.thinking !== undefined && override.thinking !== pi.getThinkingLevel()) {
+        pi.setThinkingLevel(override.thinking);
+        // Only later changes can be user overrides of this phase's level.
+        start.leaf = ctx.sessionManager.getLeafId();
+      }
+    } finally {
+      applied.resolve();
+      if (quitting.has(session)) await override.restore();
+    }
+  });
+
+  async function restoreModel(ctx: ExtensionContext, start: ModelSnapshot) {
+    let manualThinking: ThinkingLevel | undefined;
+    let recordedModel: string | undefined;
+    let entry = ctx.sessionManager.getLeafEntry();
+    while (entry && entry.id !== start.leaf && (!recordedModel || manualThinking === undefined)) {
+      const change = entry;
+      entry = change.parentId ? ctx.sessionManager.getEntry(change.parentId) : undefined;
+      // On resume Pi also takes the model from the latest assistant message, including an aborted one.
+      if (recordedModel === undefined) {
+        if (change.type === "model_change") recordedModel = `${change.provider}/${change.modelId}`;
+        else if (change.type === "message" && change.message.role === "assistant") {
+          recordedModel = `${change.message.provider}/${change.message.model}`;
+        }
+      }
+      if (manualThinking !== undefined || change.type !== "thinking_level_change") continue;
+      if (entry?.type === "model_change") {
+        if (selectionAdjustments.has(entry)) {
+          if (selectionAdjustments.get(entry) === change) continue;
+        } else {
+          // Pi skips model_select on reselection. An adjacent manual change can differ from its default.
+          const level = start.defaults.modelThinkingLevels?.[`${entry.provider}/${entry.modelId}`] ?? start.defaults.defaultThinkingLevel;
+          const model = ctx.modelRegistry.find(entry.provider, entry.modelId);
+          if (model && level && clampThinkingLevel(model, level) === change.thinkingLevel) continue;
+        }
+      }
+      manualThinking = change.thinkingLevel as ThinkingLevel;
+    }
+    const original = modelRef(start.model);
+    if (!ctx.model || modelRef(ctx.model) !== original || (recordedModel && recordedModel !== original)) {
+      await trySetModel(start.model, ctx);
+    }
+    const thinking = manualThinking ?? start.thinking;
+    if (pi.getThinkingLevel() !== thinking) pi.setThinkingLevel(thinking);
+  }
+
+  pi.on("agent_settled", () => promptModel.getStore()?.restore?.());
+  pi.on("session_shutdown", async (event, ctx) => {
+    if (event.reason !== "quit") return;
+    const session = ctx.sessionManager;
+    quitting.add(session);
+    const phase = activePhases.get(session);
+    if (!phase) return;
+    // Pi 0.86 emits shutdown before aborting. Let the final message reach the transcript first.
+    try {
+      if (!ctx.isIdle()) {
+        ctx.abort();
+        await phase.waitForIdle();
+      }
+    } finally {
+      await phase.restore?.();
+    }
+  });
+
   function persistReviewSettings() {
     pi.appendEntry(REVIEW_SETTINGS_TYPE, {
       loopFixingEnabled: reviewLoopFixingEnabled,
@@ -1186,6 +1415,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
   }
 
   pi.on("session_start", (_event, ctx) => {
+    quitting.delete(ctx.sessionManager);
     applyAllReviewState(ctx);
   });
 
@@ -1205,6 +1435,48 @@ export default function reviewExtension(pi: ExtensionAPI) {
     }
 
     return "commit";
+  }
+
+  async function showModelSettings(ctx: ExtensionContext) {
+    const settings = await readModelSettings();
+    const useSession = "Use session model";
+    const fields = ["reviewModel", "fixModel"] as const;
+    const labels = fields.map(field => {
+      const value = settings[field];
+      const selection = typeof value === "string" ? value : value === undefined ? useSession : "Invalid selection";
+      const level = settings[THINKING_FIELD[field]];
+      return `${field === "reviewModel" ? "Review" : "Fix"}: ${selection}${typeof level === "string" ? ` (${level})` : ""}`;
+    });
+    const choice = await ctx.ui.select("Model settings", labels);
+    if (choice === undefined) return;
+    const field = fields[labels.indexOf(choice)];
+    const phase = field === "reviewModel" ? "Review" : "Fix";
+    const scope = new Set(ctx.scopedModels.map(({ model }) => modelRef(model)));
+    const available = ctx.modelRegistry.getAvailable();
+    const models = available.map(modelRef).filter(ref => !scope.size || scope.has(ref)).sort();
+    const selected = await showSearchableSelect(ctx, {
+      title: `${phase} model`,
+      items: [useSession, ...models].map(value => ({ value, label: value })),
+      emptyCopy: "No matching models",
+      mapResult: item => item.value,
+    });
+    if (selected === null) return;
+    const model = available.find(m => modelRef(m) === selected);
+    let thinking: ThinkingLevel | undefined;
+    if (model) {
+      const levels = getSupportedThinkingLevels(model);
+      if (!levels.length) {
+        ctx.ui.notify(`${selected} has no supported thinking levels.`, "warning");
+        return;
+      }
+      const current = levels.find(level => selected === settings[field] && level === settings[THINKING_FIELD[field]]);
+      const choices = current ? [current, ...levels.filter(level => level !== current)] : levels;
+      const selectedLevel = await ctx.ui.select(`${phase} thinking level`, choices);
+      thinking = levels.find(level => level === selectedLevel);
+      if (thinking === undefined) return;
+    }
+    await saveModelSetting(path.join(getAgentDir(), "review.json"), field, settings, model && selected, thinking);
+    ctx.ui.notify("Model settings saved.", "info");
   }
 
   async function showReviewSelector(ctx: ExtensionContext): Promise<ReviewTarget | null> {
@@ -1240,6 +1512,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
           label: loopToggleLabel,
           description: loopToggleDescription,
         },
+        { value: "modelSettings", label: "Model settings", description: "(review and fix)" },
       ];
 
       const result = await ctx.ui.custom<ReviewPresetValue | null>((tui, theme, _kb, done) => {
@@ -1283,6 +1556,11 @@ export default function reviewExtension(pi: ExtensionAPI) {
       }, SELECTOR_BLOCKED_OPTIONS("Select a review preset"));
 
       if (!result) return null;
+
+      if (result === "modelSettings") {
+        await showModelSettings(ctx);
+        continue;
+      }
 
       if (result === TOGGLE_LOOP_FIXING_VALUE) {
         const nextEnabled = !reviewLoopFixingEnabled;
@@ -1558,6 +1836,12 @@ export default function reviewExtension(pi: ExtensionAPI) {
       return false;
     }
 
+    const { override, session, fallback } = await getRunModels(ctx, "reviewModel");
+    if (fallback) ctx.ui.notify("Review model unavailable. Using the session model.", "warning");
+    if (!session && override.model) {
+      if (!await pi.setModel(override.model)) throw new Error(`Could not select ${modelRef(override.model)} as the session model.`);
+      ctx.ui.notify(`Using ${modelRef(override.model)} as the session model.`, "info");
+    }
     if (useFreshSession) {
       // In an empty session there is no leaf yet, so create a lightweight anchor first.
       let originId = ctx.sessionManager.getLeafId() ?? undefined;
@@ -1631,7 +1915,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
     ctx.ui.notify(`Starting review: ${hint}${modeHint}`, "info");
 
     options?.onBeforeSend?.();
-    pi.sendUserMessage(fullPrompt);
+    promptModel.run({ ...override, waitForIdle: () => ctx.waitForIdle() }, () => pi.sendUserMessage(fullPrompt));
     return true;
   }
 
@@ -2045,6 +2329,12 @@ Instructions:
       return "ok";
     }
 
+    let fixOverride: RunModel = {};
+    if (action === "returnAndFix") {
+      const { override, fallback } = await getRunModels(ctx, "fixModel");
+      fixOverride = override;
+      if (fallback) ctx.ui.notify("Fix model unavailable. Using the session model.", "warning");
+    }
     const summaryResult = await navigateWithSummary(
       ctx,
       originId,
@@ -2080,7 +2370,9 @@ Instructions:
     }
 
     options.onBeforeSend?.();
-    pi.sendUserMessage(REVIEW_FIX_FINDINGS_PROMPT, { deliverAs: "followUp" });
+    promptModel.run({ ...fixOverride, waitForIdle: () => ctx.waitForIdle() }, () =>
+      pi.sendUserMessage(REVIEW_FIX_FINDINGS_PROMPT, { deliverAs: "followUp" }),
+    );
     if (notifySuccess) {
       ctx.ui.notify("Review complete! Returned and queued a follow-up to fix findings.", "info");
     }
