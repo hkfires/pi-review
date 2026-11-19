@@ -1045,13 +1045,13 @@ function tokenizeArgs(value: string): string[] {
     const char = value[i];
 
     if (quote) {
-      if (char === "\\" && i + 1 < value.length) {
-        current += value[i + 1];
-        i += 1;
-        continue;
-      }
       if (char === quote) {
-        quote = null;
+        let backslashes = 0;
+        while (value[i - backslashes - 1] === "\\") backslashes += 1;
+        // Decode pairs only before the active quote; preserve all other path separators.
+        if (backslashes > 0) current = current.slice(0, -Math.ceil(backslashes / 2));
+        if (backslashes % 2 === 1) current += char;
+        else quote = null;
         continue;
       }
       current += char;

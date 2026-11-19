@@ -13,6 +13,54 @@ import {
 import { getKeybindings, type TUI } from "@earendil-works/pi-tui";
 import reviewExtension, { __test__ } from "../index.ts";
 
+for (const { name, input, paths } of [
+  { name: "double-quoted Windows path", input: String.raw`"C:\Users\Alice\My Project"`, paths: [String.raw`C:\Users\Alice\My Project`] },
+  { name: "single-quoted Windows path", input: String.raw`'C:\Users\Alice\My Project'`, paths: [String.raw`C:\Users\Alice\My Project`] },
+  { name: "quoted UNC path", input: String.raw`"\\server\share\My Project"`, paths: [String.raw`\\server\share\My Project`] },
+  { name: "unquoted Windows path", input: String.raw`C:\Users\Alice\Project`, paths: [String.raw`C:\Users\Alice\Project`] },
+  { name: "mixed paths", input: String.raw`src "C:\My Project" docs`, paths: ["src", String.raw`C:\My Project`, "docs"] },
+  { name: "escaped matching quote", input: String.raw`"my\"project"`, paths: ['my"project'] },
+  { name: "escaped matching single quote", input: String.raw`'my\'project'`, paths: ["my'project"] },
+  { name: "backslash before a different quote", input: String.raw`"my\'project"`, paths: [String.raw`my\'project`] },
+]) {
+  test(`folder arguments: ${name}`, () => {
+    assert.deepEqual(__test__.parseArgs(`folder ${input}`), { target: { type: "folder", paths }, extraInstruction: undefined });
+    assert.deepEqual(__test__.parseReviewPaths(input), paths);
+  });
+}
+
+test("consecutive backslashes do not swallow folder arguments or extra instructions", () => {
+  assert.deepEqual(__test__.parseArgs(String.raw`folder "C:\\" docs --extra "focus"`), {
+    target: { type: "folder", paths: ["C:\\", "docs"] },
+    extraInstruction: "focus",
+  });
+  assert.deepEqual(__test__.parseReviewPaths(String.raw`"C:\\" docs`), ["C:\\", "docs"]);
+});
+
+for (const quote of ['"', "'"]) {
+  for (let count = 0; count <= 6; count++) {
+    test(`quoted arguments: ${count} backslashes before ${quote}`, () => {
+      const slashes = "\\".repeat(count);
+      const decoded = "\\".repeat(Math.floor(count / 2));
+      const odd = count % 2 === 1;
+      const input = `${quote}C:${slashes}${quote}${odd ? `name${quote}` : ""} docs`;
+      const paths = [`C:${decoded}${odd ? `${quote}name` : ""}`, "docs"];
+      assert.deepEqual(__test__.parseReviewPaths(input), paths);
+      assert.deepEqual(__test__.parseArgs(`folder ${input} --extra ${quote}focus${quote}`), {
+        target: { type: "folder", paths },
+        extraInstruction: "focus",
+      });
+    });
+  }
+}
+
+test("extra instructions preserve backslashes and escaped quotes", () => {
+  assert.deepEqual(__test__.parseArgs(String.raw`uncommitted --extra "Check C:\src and \"quoted\" text"`), {
+    target: { type: "uncommitted" },
+    extraInstruction: String.raw`Check C:\src and "quoted" text`,
+  });
+});
+
 const review = { reviewModel: "local/review" };
 const fix = { fixModel: "fix-provider/fix" };
 const menuModelId = "team/Fix Model";
